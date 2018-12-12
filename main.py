@@ -197,6 +197,19 @@ class _BinsCollection(object):
     return self._sigma
 
 
+def _DefineOrderOfTheNumber(number):
+  """Defines order of magnitude for a number.
+
+  https://en.wikipedia.org/wiki/Order_of_magnitude.
+
+  Args:
+    number: number to define the order of magnitude for.
+
+  Returns: 
+    10 in the power of arg number's order of magnitude.
+  """
+  return 10 ** math.floor(math.log10(number))
+
 
 class _Dissimilarity(object):
   """Structure containing information about dissimilarity between 2 clusters."""
@@ -1408,27 +1421,60 @@ class _TreePlotter(object):
       raise ValueError('No cluster ids')
     if len(cluster_ids) == 1:
       return
+   
+    # List of tuples: (distance between medians, dissimilarity).
+    distances_and_dissimilarities = []
+    # List of tuples: (closeness score, dissimilarity).
+    closeness_scores_and_dissimilarities = []
 
-    dissimilarities = []
-    # Calculate distance between each pair of clusters.
+    min_dissimilarity = None
+    max_distance = None
+    # Calculate diss between each pair of clusters.
     for i, first_cluster_id in enumerate(cluster_ids):
       for j in xrange(i + 1, len(cluster_ids)):
         second_cluster_id = cluster_ids[j]
         print 'Calculating dissimilarity between %s and %s' % (
             first_cluster_id, second_cluster_id)
-        dissimilarities.append(
-          _CalculateDissimilarityBetweenClusters(
-              first_cluster_id, 
-              self._bin_collection_by_cluster_id.get(first_cluster_id),
-              second_cluster_id,
-              self._bin_collection_by_cluster_id.get(second_cluster_id)))
+        distance_between_medians = _Dist(
+            self._bin_collection_by_cluster_id.get(
+                first_cluster_id).GetMedian(),
+            self._bin_collection_by_cluster_id.get(
+                second_cluster_id).GetMedian())
+        diss = _CalculateDissimilarityBetweenClusters(
+            first_cluster_id, 
+            self._bin_collection_by_cluster_id.get(first_cluster_id),
+            second_cluster_id,
+            self._bin_collection_by_cluster_id.get(second_cluster_id))
+        if max_distance is None or distance_between_medians > max_distance:
+          max_distance = distance_between_medians
+        if (min_dissimilarity is None 
+            or min_dissimilarity < diss.dissimilarity_score):
+          min_dissimilarity = diss.dissimilarity_score
+        distances_and_dissimilarities.append((distance_between_medians, diss))
+
+    # Defines the metric to scale all distances between medians to the number
+    # which order does not exceed the order of the min qf score to avoid the
+    # correcting part in the formula below to outweight the QF part.
+    closeness_scaling = (
+        _DefineOrderOfTheNumber(max_distance) 
+        / _DefineOrderOfTheNumber(min_dissimilarity))
+
+    for distance_between_medians, diss in distances_and_dissimilarities:
+      closeness_scores_and_dissimilarities.append((
+          (diss.dissimilarity_score
+           + (1.0 / closeness_scaling) * distance_between_medians), 
+          diss))
+      print '%s::%s' % (
+          diss.dissimilarity_score,
+          (diss.dissimilarity_score + 
+           (1.0 / closeness_scaling) * distance_between_medians))
 
     paired_cluster_ids = set()
     next_level_cluster_ids = set()
 
-    dissimilarities = sorted(
-        dissimilarities, key=lambda d: d.dissimilarity_score)
-    for diss in dissimilarities:
+    closeness_scores_and_dissimilarities = sorted(
+        closeness_scores_and_dissimilarities, key=lambda (c, _): c)
+    for _, diss in closeness_scores_and_dissimilarities:
       if (diss.left_cluster_id in paired_cluster_ids
           and diss.right_cluster_id in paired_cluster_ids):
         continue
@@ -1450,21 +1496,24 @@ class _TreePlotter(object):
 
         self._graph.add_node(str(parent_cluster_id))
 
-        self._graph.add_edge(str(parent_cluster_id), str(diss.left_cluster_id))
-        self._graph.add_edge(str(parent_cluster_id), str(diss.right_cluster_id))
+        self._graph.add_edge(
+            str(parent_cluster_id), str(diss.left_cluster_id))
+        self._graph.add_edge(
+            str(parent_cluster_id), str(diss.right_cluster_id))
 
         paired_cluster_ids.add(diss.right_cluster_id)
         paired_cluster_ids.add(diss.left_cluster_id)
         next_level_cluster_ids.add(parent_cluster_id)
-        self._bin_collection_by_cluster_id[parent_cluster_id] = _MixCollections(
-            self._bin_collection_by_cluster_id.get(diss.left_cluster_id),
-            self._bin_collection_by_cluster_id.get(diss.right_cluster_id))
+        self._bin_collection_by_cluster_id[parent_cluster_id] = (
+            _MixCollections(
+                self._bin_collection_by_cluster_id.get(diss.left_cluster_id),
+                self._bin_collection_by_cluster_id.get(diss.right_cluster_id)))
         self._node_sizes[str(parent_cluster_id)] = self._GetNodeSize(
             self._bin_collection_by_cluster_id.get(parent_cluster_id)
             .GetTotalNumPoints())
 
-    # Recursion here can be avoided if needed (performance issues, max recursion
-    # depth etc).
+    # Recursion here can be avoided if needed 
+    # (performance issues, max recursion depth etc).
     self._GenerateRelations(list(next_level_cluster_ids))
 
   def _GetNodeSize(self, num_points_for_node):
