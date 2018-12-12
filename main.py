@@ -34,11 +34,11 @@ import point
 
 # SETTINGS.
 # TODO: consider moving them to sys.args and let user provide them from CLI.
-_LEFT_FILENAME = ''
-_RIGHT_FILENAME = ''
+_LEFT_FILENAME = '/Users/dyorlova/Downloads/testQF/ManualLiveBALBc2.csv'
+_RIGHT_FILENAME = '/Users/dyorlova/Downloads/testQF/ManualLiveBALBc2.csv'
 
 # Minimal bin size for binning the mix.
-_BIN_SIZE = 1000
+_BIN_SIZE = 300
 
 # How many first rows in data files contain bogus data (headers, description
 # etc)
@@ -47,9 +47,9 @@ _NUM_FIRST_ROWS_TO_SKIP_IN_THE_DATA_FILES = 1
 _DATA_FILES_LINE_SEPARATOR = '\r'
 _COLUMNS_SEPARATOR_REGEX= r','
 # In which columns we have features' values in data files.
-_DATA_FILES_X_COLUMNS = (0, 1, 2, 3, 4, 5, 6)
+_DATA_FILES_X_COLUMNS = (0, 1, 2, 3, 4, 5, 6, 7)
 # In which column we have cluster id in data files.
-_DATA_FILES_CLUSTER_ID_COLUMN = 7
+_DATA_FILES_CLUSTER_ID_COLUMN = 8
 
 # Whether we want not to show clusters with ids < 0 on plot.
 _DO_NOT_SHOW_NEGATIVE_CLUSERS_ON_PLOT = False
@@ -196,6 +196,119 @@ class _BinsCollection(object):
       self._sigma = np.std(self._GetAllPointsCoordinates(), axis=0)
     return self._sigma
 
+  def _GenerateRelations(self, cluster_ids):
+    if not cluster_ids:
+      raise ValueError('No cluster ids')
+    if len(cluster_ids) == 1:
+      return
+   
+    # List of tuples: (distance between medians, dissimilarity).
+    distances_and_dissimilarities = []
+    # List of tuples: (closeness score, dissimilarity).
+    closeness_scores_and_dissimilarities = []
+
+    min_dissimilarity = None
+    max_distance = None
+    # Calculate diss between each pair of clusters.
+    for i, first_cluster_id in enumerate(cluster_ids):
+      for j in xrange(i + 1, len(cluster_ids)):
+        second_cluster_id = cluster_ids[j]
+        print 'Calculating dissimilarity between %s and %s' % (
+            first_cluster_id, second_cluster_id)
+        distance_between_medians = _Dist(
+            self._bin_collection_by_cluster_id.get(
+                first_cluster_id).GetMedian(),
+            self._bin_collection_by_cluster_id.get(
+                second_cluster_id).GetMedian())
+        diss = _CalculateDissimilarityBetweenClusters(
+            first_cluster_id, 
+            self._bin_collection_by_cluster_id.get(first_cluster_id),
+            second_cluster_id,
+            self._bin_collection_by_cluster_id.get(second_cluster_id))
+        if max_distance is None or distance_between_medians > max_distance:
+          max_distance = distance_between_medians
+        if (min_dissimilarity is None 
+            or min_dissimilarity < diss.dissimilarity_score):
+          min_dissimilarity = diss.dissimilarity_score
+        distances_and_dissimilarities.append((distance_between_medians, diss))
+
+    # Defines the metric to scale all distances between medians to the number
+    # which order does not exceed the order of the min qf score to avoid the
+    # correcting part in the formula below to outweight the QF part.
+    closeness_scaling = (
+        _DefineOrderOfTheNumber(max_distance) 
+        / _DefineOrderOfTheNumber(min_dissimilarity))
+
+    for distance_between_medians, diss in distances_and_dissimilarities:
+      closeness_scores_and_dissimilarities.append((
+          (diss.dissimilarity_score
+           + (1.0 / closeness_scaling) * distance_between_medians), 
+          diss))
+      print '%s::%s' % (
+          diss.dissimilarity_score,
+          (diss.dissimilarity_score + 
+           (1.0 / closeness_scaling) * distance_between_medians))
+
+    paired_cluster_ids = set()
+    next_level_cluster_ids = set()
+
+    closeness_scores_and_dissimilarities = sorted(
+        closeness_scores_and_dissimilarities, key=lambda (c, _): c)
+    for _, diss in closeness_scores_and_dissimilarities:
+      if (diss.left_cluster_id in paired_cluster_ids
+          and diss.right_cluster_id in paired_cluster_ids):
+        continue
+      elif diss.left_cluster_id in paired_cluster_ids:
+        # If this is the smallest dissimilarity between cluster A and B BUT
+        # for cluster A there was smaller dissimilarity with cluster C earlier,
+        # make sure that cluster B is not paired with any other cluster at this
+        # tree level.
+        paired_cluster_ids.add(diss.right_cluster_id)
+        next_level_cluster_ids.add(diss.right_cluster_id)
+      elif diss.right_cluster_id in paired_cluster_ids:
+        paired_cluster_ids.add(diss.left_cluster_id)
+        next_level_cluster_ids.add(diss.left_cluster_id)
+      else:
+        parent_cluster_id = cluster.ClusterId(
+            (diss.left_cluster_id, diss.right_cluster_id))
+        print 'Pairing clusters %s and %s' % (
+            diss.left_cluster_id, diss.right_cluster_id)
+
+        self._graph.add_node(str(parent_cluster_id))
+
+        self._graph.add_edge(
+            str(parent_cluster_id), str(diss.left_cluster_id))
+        self._graph.add_edge(
+            str(parent_cluster_id), str(diss.right_cluster_id))
+
+        paired_cluster_ids.add(diss.right_cluster_id)
+        paired_cluster_ids.add(diss.left_cluster_id)
+        next_level_cluster_ids.add(parent_cluster_id)
+        self._bin_collection_by_cluster_id[parent_cluster_id] = (
+            _MixCollections(
+                self._bin_collection_by_cluster_id.get(diss.left_cluster_id),
+                self._bin_collection_by_cluster_id.get(diss.right_cluster_id)))
+        self._node_sizes[str(parent_cluster_id)] = self._GetNodeSize(
+            self._bin_collection_by_cluster_id.get(parent_cluster_id)
+            .GetTotalNumPoints())
+
+    # Recursion here can be avoided if needed 
+    # (performance issues, max recursion depth etc).
+    self._GenerateRelations(list(next_level_cluster_ids))
+
+
+def _DefineOrderOfTheNumber(number):
+  """Defines order of magnitude for a number.
+
+  https://en.wikipedia.org/wiki/Order_of_magnitude.
+
+  Args:
+    number: number to define the order of magnitude for.
+
+  Returns: 
+    10 in the power of arg number's order of magnitude.
+  """
+  return 10 ** math.floor(math.log10(number))
 
 
 class _Dissimilarity(object):
@@ -1482,8 +1595,8 @@ class _TreePlotter(object):
 
 
 def main(unused_argv):
-  _Matcher().MatchAndMds()
-  #_TreePlotter(_LEFT_FILENAME).Plot()
+  #_Matcher().MatchAndMds()
+  _TreePlotter(_LEFT_FILENAME).Plot()
 
 
 if __name__ == '__main__':
